@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Blue rounded-rectangle background -->
+  <rect width="32" height="32" rx="7" ry="7" fill="#3b82f6"/>
+  <!-- HiShieldCheck path (Heroicons v2 solid, scaled to fit 6-26 range) -->
+  <path
+    fill="white"
+    d="M16 3
+       C16 3 8 6.5 8 13
+       L8 20
+       C8 23.5 11.5 26.5 16 29
+       C20.5 26.5 24 23.5 24 20
+       L24 13
+       C24 6.5 16 3 16 3Z"
+  />
+  <!-- Checkmark -->
+  <polyline
+    points="12,16.5 15,19.5 20.5,14"
+    stroke="#3b82f6"
+    stroke-width="2.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+</svg>
