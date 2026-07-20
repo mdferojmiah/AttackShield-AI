@@ -14,6 +14,7 @@ import React, {
 import { AuthAPI } from '@/services/api';
 import { UserStorage } from '@/services/storage';
 import type { User, LoginFormData } from '@/types';
+import { HubConnectionState } from '@microsoft/signalr';
 import { getSocketInstance } from './SocketContext';
 
 interface AuthState {
@@ -112,9 +113,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
   );
 
   const logout = useCallback(() => {
+    // Ask the AI service to stop by dropping the realtime connection. The hub's
+    // OnDisconnectedAsync stops detection when a user's last connection closes,
+    // matching the original server behaviour (the old 'stop-detection' emit had
+    // no server handler — stop was driven entirely by disconnect).
     const socket = getSocketInstance();
-    if (socket?.connected && state.user) {
-      socket.emit('stop-detection', { user: state.user.name });
+    if (socket?.state === HubConnectionState.Connected && state.user) {
+      socket.stop().catch(() => {
+        /* best-effort: logout must not block on the realtime channel */
+      });
     }
     UserStorage.logout();
     setState({ ...initialState, isLoading: false });
