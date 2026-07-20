@@ -1,6 +1,9 @@
 /**
  * Socket Context
- * Socket.IO connection management for real-time events
+ * SignalR connection management for real-time events.
+ * Replaces the original Socket.IO client. Event names are preserved verbatim
+ * (detection-overlay, weapon-detected, notification-created, alert-created,
+ * detection-started) so consumer components keep using connection.on(...).
  */
 
 import React, {
@@ -11,11 +14,16 @@ import React, {
   useState,
   type ReactNode,
 } from 'react';
-import io, { type Socket } from 'socket.io-client';
+import {
+  HubConnectionBuilder,
+  HubConnectionState,
+  type HubConnection,
+} from '@microsoft/signalr';
 import { API_CONFIG } from '@/config';
+import { UserStorage } from '@/services/storage';
 
 interface SocketContextType {
-  socket: Socket | null;
+  socket: HubConnection | null;
   sendDetectionRequest: (payload: {
     stream_url: string;
     user: string;
@@ -31,16 +39,16 @@ interface SocketProviderProps {
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
 
-// Module-level reference to the latest socket instance
-let latestSocket: Socket | null = null;
+// Module-level reference to the latest connection instance
+let latestSocket: HubConnection | null = null;
 
-export function getSocketInstance(): Socket | null {
+export function getSocketInstance(): HubConnection | null {
   return latestSocket;
 }
 
 export function SocketProvider({ children }: SocketProviderProps) {
-  const socketRef = useRef<Socket | null>(null);
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<HubConnection | null>(null);
+  const [socket, setSocket] = useState<HubConnection | null>(null);
 
   const sendDetectionRequest = (payload: {
     stream_url: string;
@@ -49,8 +57,19 @@ export function SocketProvider({ children }: SocketProviderProps) {
     camera_name?: string;
     camera_id?: string;
   }) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit('start-detection', payload);
+    if (socketRef.current?.state === HubConnectionState.Connected) {
+      // Hub method StartDetection expects camelCase keys (StartDetectionPayload).
+      socketRef.current
+        .invoke('StartDetection', {
+          streamUrl: payload.stream_url,
+          location: payload.location,
+          user: payload.user,
+          cameraName: payload.camera_name,
+          cameraId: payload.camera_id,
+        })
+        .catch((error) =>
+          console.error('[Socket] StartDetection invoke failed:', error),
+        );
       console.log('[Socket] Sent detection request:', payload);
     } else {
       console.warn('[Socket] Not connected. Cannot send detection request.');
@@ -60,38 +79,37 @@ export function SocketProvider({ children }: SocketProviderProps) {
   useEffect(() => {
     console.log('[Socket] Connecting to:', API_CONFIG.BASE_URL);
 
-    const s = io(API_CONFIG.BASE_URL, {
-      transports: ['websocket', 'polling'],
-      timeout: 30000,
-      forceNew: true,
-      reconnection: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1500,
+    const connection = new HubConnectionBuilder()
+      .withUrl(`${API_CONFIG.BASE_URL}/socket`, {
+        // The .NET JwtBearer OnMessageReceived handler reads the token from the
+        // access_token query for /socket paths. Harmless if the hub is anonymous.
+        accessTokenFactory: () => UserStorage.getToken() ?? '',
+      })
+      .withAutomaticReconnect([0, 1500, 3000, 5000, 10000])
+      .build();
+
+    socketRef.current = connection;
+    setSocket(connection);
+    latestSocket = connection;
+
+    connection.onreconnected((connectionId) => {
+      console.log('[Socket] Reconnected', connectionId);
     });
 
-    socketRef.current = s;
-    setSocket(s);
-    latestSocket = s;
-
-    s.on('connect', () => {
-      console.log('[Socket] Connected', s.id);
+    connection.onclose((error) => {
+      console.log('[Socket] Disconnected:', error?.message ?? 'closed');
     });
 
-    s.on('disconnect', (reason) => {
-      console.log('[Socket] Disconnected:', reason);
-    });
-
-    s.on('connect_error', (error) => {
-      console.error('[Socket] Connection error:', error.message);
-    });
-
-    s.on('reconnect', (attemptNumber: number) => {
-      console.log('[Socket] Reconnected after', attemptNumber, 'attempts');
-    });
+    connection
+      .start()
+      .then(() => console.log('[Socket] Connected', connection.connectionId))
+      .catch((error) =>
+        console.error('[Socket] Connection error:', error?.message ?? error),
+      );
 
     return () => {
       console.log('[Socket] Disconnecting…');
-      s.disconnect();
+      connection.stop();
       socketRef.current = null;
       setSocket(null);
       latestSocket = null;
