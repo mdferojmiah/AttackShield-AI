@@ -108,3 +108,8 @@ tsconfig.tsbuildinfo
 .cache/
 tmp/
 temp/
+
+# ─── .NET / C# build output ───
+[Bb]in/
+[Oo]bj/
+*.user
