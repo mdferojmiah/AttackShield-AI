@@ -20,9 +20,11 @@ public sealed class BCryptPasswordHasher : IPasswordHasher
         {
             return BCrypt.Net.BCrypt.Verify(password, hash);
         }
-        catch (BCrypt.Net.SaltParseException)
+        catch (Exception ex) when (ex is BCrypt.Net.SaltParseException or ArgumentException or FormatException)
         {
-            // Malformed/legacy hash — treat as a failed verification rather than throwing.
+            // Malformed/legacy/truncated hash — treat as a failed verification rather
+            // than throwing. BCrypt.Net signals bad input via several exception types
+            // (SaltParseException, ArgumentOutOfRangeException, FormatException).
             return false;
         }
     }

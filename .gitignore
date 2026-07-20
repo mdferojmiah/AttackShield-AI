@@ -109,7 +109,7 @@ tsconfig.tsbuildinfo
 tmp/
 temp/
 
-# --- .NET / C# build output ---
+# ─── .NET / C# build output ───
 [Bb]in/
 [Oo]bj/
 *.user
