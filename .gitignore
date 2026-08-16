@@ -74,12 +74,12 @@ Frontend/.vite/
 Frontend/build/
 
 # ─── HLS stream segments (runtime-generated, not source) ───────────
-Backend/public/streams/**/seg_*.ts
-Backend/public/streams/**/*.m3u8
-Backend/public/streams/**/*.m4s
-Backend/public/streams/**/*.tmp
+Backend.NET/src/AttackShield.API/wwwroot/streams/**/seg_*.ts
+Backend.NET/src/AttackShield.API/wwwroot/streams/**/*.m3u8
+Backend.NET/src/AttackShield.API/wwwroot/streams/**/*.m4s
+Backend.NET/src/AttackShield.API/wwwroot/streams/**/*.tmp
 # Keep the directory structure but not the files
-!Backend/public/streams/.gitkeep
+!Backend.NET/src/AttackShield.API/wwwroot/streams/.gitkeep
 
 # ─── Logs ──────────────────────────────────────────────────────────
 *.log

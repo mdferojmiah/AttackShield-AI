@@ -1,115 +1,54 @@
-# AttackShield AI – Intelligent Surveillance System
+# AttackShield AI
 
-A web application built using React + Vite + TypeScript, designed to transform ordinary CCTV cameras into an intelligent, real-time security and threat-detection system. It leverages a **multi-model ensemble architecture**: YOLOv10 for weapon detection, motion-based spatiotemporal analysis for suspicious activity detection, and Haar/RetinaFace for face detection. The system delivers live monitoring, automated alerts, trust-score governance, ensemble metrics, and a complete security workflow for users and authorities.
+AttackShield AI is an intelligent CCTV monitoring system built from three active services:
 
-🚀 Features Completed So Far
-✔ 1. User Authentication
+- `Frontend/`: React, TypeScript, and Vite web client.
+- `Backend.NET/`: ASP.NET Core 8 REST API, SignalR hub, MongoDB persistence, and FFmpeg stream management.
+- `AIService/`: FastAPI detection service for weapons, suspicious activity, faces, and hit-list matching.
 
-User Signup with full details
+## Features
 
-Authority/Police Signup with station mapping
+- User and authority authentication, including Google OAuth support.
+- Camera management from Live Feed using direct RTSP URLs or IP-camera presets.
+- HLS and low-latency MJPEG streaming through FFmpeg.
+- Weapon and suspicious-activity detection with screenshot evidence.
+- Per-user face hit lists with high-priority alerts.
+- Dashboard statistics, alerts, notifications, settings, and realtime SignalR updates.
 
-Unified Login screen (User + Authority + Admin)
+## Local Services
 
-Secure backend integration via Node.js + MongoDB
+| Service | Default URL |
+| --- | --- |
+| Frontend | `http://localhost:3000` |
+| ASP.NET API | `http://localhost:5217` |
+| AI service | `http://localhost:8000` |
 
-✔ 2. CCTV Integration
+MongoDB and FFmpeg must be available to the ASP.NET API. Environment-specific values are configured through the service configuration and `.env.example` files.
 
-During signup, users can attach their CCTV details:
+## Development
 
-Camera Name
+Frontend:
 
-RTSP/HTTP Stream URL
+```powershell
+npm --prefix Frontend install
+npm --prefix Frontend run dev
+```
 
-Camera Location
+Backend:
 
-Linked to user profile in MongoDB
-After login, CCTV automatically loads into the Live Feed screen.
+```powershell
+dotnet run --project Backend.NET/src/AttackShield.API/AttackShield.API.csproj
+```
 
-✔ 3. Live Feed Screen
+AI service:
 
-A dedicated screen where users can see:
+```powershell
+python -m pip install -r AIService/requirements.txt
+python AIService/main.py
+```
 
-Real-time CCTV video stream
+Run backend tests:
 
-Overlay controls like Zoom, Brightness, Settings
-
-Detection banners (future): Weapon Detected, Suspicious Activity, Person of Interest
-
-Fully designed UI, matching modern dark-theme security dashboards.
-
-✔ 4. Dashboard Screen
-
-Displays user’s system summary:
-
-Total detected weapons
-
-Total alerts sent
-
-Accuracy (placeholder)
-
-Recent Activity List: Critical, Medium, Normal events
-
-Built in clean, card-based layout with dark UI and accent colors.
-
-✔ 5. Notifications Screen
-
-List-style interface showing real-time events such as:
-
-Suspicious Activity Detected
-
-Unusual Movement
-
-Person Loitering Near Entrance
-
-Package Left Unattended
-
-Camera Offline
-Includes icons, timestamps, and short descriptions.
-
-📁 Project Structure (Frontend Only So Far)
-project/
- ├── app/
- │   ├── screens/
- │   │   ├── LoginScreen.tsx
- │   │   ├── UserSignupScreen.tsx
- │   │   ├── AuthoritySignup.tsx
- │   │   ├── LiveFeedScreen.tsx
- │   │   ├── DashboardScreen.tsx
- │   │   ├── NotificationsScreen.tsx
- │   ├── components/
- │   ├── navigation/
- │   ├── utils/
- ├── package.json
- └── README.md
-
-🛠 Tech Stack
-Frontend (Mobile App)
-
-React Native + Expo
-
-React Navigation
-
-Axios
-
-Modern UI + Dark Theme
-
-Backend (Partially Connected)
-
-Node.js + Express
-
-MongoDB + Mongoose
-
-JWT Authentication
-
-📅 Next Steps (Upcoming Implementation)
-
-Weapon detection overlay using stream frames
-
-Suspicious behavior classification
-
-Face recognition module
-
-Police authority dashboard
-
-Alert dispatch workflow
+```powershell
+dotnet test Backend.NET/tests/AttackShield.Tests/AttackShield.Tests.csproj
+```
