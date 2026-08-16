@@ -1,0 +1,6 @@
+@AttackShield.API_HostAddress = http://localhost:5217
+
+GET {{AttackShield.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
