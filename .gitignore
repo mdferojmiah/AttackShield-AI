@@ -91,6 +91,7 @@ logs/
 Thumbs.db
 Desktop.ini
 
+.vscode/*
 .vscode/settings.json
 .vscode/*.code-snippets
 .idea/
