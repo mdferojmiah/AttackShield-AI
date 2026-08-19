@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   HiArrowLeft,
@@ -10,7 +10,9 @@ import {
   HiMapPin,
   HiVideoCamera,
 } from 'react-icons/hi2';
+import { NotificationsAPI } from '@/services/api';
 import { useDocumentTitle } from '@/hooks';
+import { LoadingSpinner } from '@/components';
 import { formatTimeAgo } from '@/utils/helpers';
 import type { NotificationItem } from '@/types';
 
@@ -68,13 +70,44 @@ export default function NotificationDetailsPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const notification = (location.state as { notification?: NotificationItem })
+  const cached = (location.state as { notification?: NotificationItem })
     ?.notification;
+
+  const [notification, setNotification] = useState<NotificationItem | null>(
+    cached ?? null,
+  );
+  // The list response omits imageUrl to keep pages small, so even a cached row must be refetched.
+  const hasFullRow = Boolean(cached?.imageUrl);
+  const hadCache = Boolean(cached);
+  const [loading, setLoading] = useState(!hasFullRow);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id || hasFullRow) return;
+
+    let active = true;
+    setLoading(true);
+    NotificationsAPI.getById(id)
+      .then((res) => {
+        if (!active) return;
+        if (res.success && res.data) setNotification(res.data);
+        else if (!hadCache) setError(res.error || 'Notification not found');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [id, hasFullRow, hadCache]);
+
+  if (loading && !notification) return <LoadingSpinner text="Loading Notification..." />;
 
   if (!notification) {
     return (
       <div className="p-8 text-center">
-        <p className="text-slate-400">Notification not found.</p>
+        <p className="text-slate-400">{error || 'Notification not found.'}</p>
         <button
           onClick={() => navigate('/notifications')}
           className="btn-primary mt-4"

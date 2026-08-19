@@ -10,6 +10,9 @@ namespace AttackShield.Api.Controllers;
 [Authorize]
 public sealed class DashboardController : ApiControllerBase
 {
+    /// <summary>Recent-activity is a fixed-size summary widget; the full feed lives at /api/notifications.</summary>
+    private const int ActivityFeedSize = 10;
+
     private readonly IDetectionRepository _detections;
     private readonly INotificationRepository _notifications;
     private readonly IAiServiceClient _ai;
@@ -68,8 +71,8 @@ public sealed class DashboardController : ApiControllerBase
     public async Task<IActionResult> GetActivity(CancellationToken ct)
     {
         var ownerId = CurrentUserRole == "admin" ? null : CurrentUserId;
-        var notifications = await _notifications.GetAllNewestAsync(ownerId, ct);
-        return Ok(notifications.Take(10).Select(MapActivity));
+        var page = await _notifications.GetPageAsync(ownerId, null, null, ActivityFeedSize, ct);
+        return Ok(page.Items.Select(MapActivity));
     }
 
     [HttpGet("metrics")]

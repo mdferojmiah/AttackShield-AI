@@ -29,6 +29,8 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   success: <HiCheckCircle className="text-emerald-400" size={24} />,
 };
 
+const PAGE_SIZE = 10;
+
 export default function NotificationsPage() {
   useDocumentTitle('Notifications');
 
@@ -37,13 +39,18 @@ export default function NotificationsPage() {
 
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
 
-  const fetchNotifications = useCallback(async () => {
+  const fetchFirstPage = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await NotificationsAPI.getAll();
+      const res = await NotificationsAPI.getPage({ limit: PAGE_SIZE });
       if (res.success && res.data) {
-        setNotifications(res.data);
+        setNotifications(res.data.items);
+        setCursor(res.data.nextCursor);
+        setHasMore(res.data.hasMore);
       }
     } catch {
       toast.error('Failed to load notifications');
@@ -52,15 +59,41 @@ export default function NotificationsPage() {
     }
   }, []);
 
+  const loadMore = useCallback(async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await NotificationsAPI.getPage({ limit: PAGE_SIZE, cursor });
+      if (res.success && res.data) {
+        const { items, nextCursor, hasMore: more } = res.data;
+        // A socket push can race an in-flight page and land the same row twice.
+        setNotifications((prev) => {
+          const seen = new Set(prev.map((n) => n._id));
+          return [...prev, ...items.filter((n) => !seen.has(n._id))];
+        });
+        setCursor(nextCursor);
+        setHasMore(more);
+      } else {
+        toast.error('Failed to load more notifications');
+      }
+    } catch {
+      toast.error('Failed to load more notifications');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [cursor, loadingMore]);
+
   useEffect(() => {
-    fetchNotifications();
-  }, [fetchNotifications]);
+    fetchFirstPage();
+  }, [fetchFirstPage]);
 
   // Real-time notification via socket
   useEffect(() => {
     if (!socket) return;
     const handler = (data: NotificationItem) => {
-      setNotifications((prev) => [data, ...prev]);
+      setNotifications((prev) =>
+        prev.some((n) => n._id === data._id) ? prev : [data, ...prev],
+      );
       toast('New notification received', { icon: '🔔' });
     };
     socket.on('notification-created', handler);
@@ -91,7 +124,7 @@ export default function NotificationsPage() {
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold text-slate-800 dark:text-white">Notifications</h2>
         <button
-          onClick={fetchNotifications}
+          onClick={fetchFirstPage}
           className="p-2 text-primary hover:bg-primary/10 rounded-lg transition-colors"
           title="Refresh"
         >
@@ -117,13 +150,6 @@ export default function NotificationsPage() {
                 !n.read ? 'border-l-4 border-l-accent' : ''
               }`}
             >
-              {n.imageUrl && (
-                <img
-                  src={n.imageUrl}
-                  alt="Detection screenshot"
-                  className="h-16 w-24 flex-shrink-0 rounded object-cover bg-black"
-                />
-              )}
               <div className="flex-shrink-0">{getIcon(n.type)}</div>
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-slate-800 dark:text-white text-sm truncate">
@@ -140,6 +166,23 @@ export default function NotificationsPage() {
             </li>
           ))}
         </ul>
+      )}
+
+      {notifications.length > 0 && (
+        <div className="mt-6 text-center">
+          {hasMore ? (
+            <button
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="btn-outline inline-flex items-center gap-2"
+            >
+              {loadingMore && <HiArrowPath className="animate-spin" size={18} />}
+              {loadingMore ? 'Loading…' : 'See more'}
+            </button>
+          ) : (
+            <p className="text-xs text-slate-500">You&rsquo;re all caught up</p>
+          )}
+        </div>
       )}
     </div>
   );

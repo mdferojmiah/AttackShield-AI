@@ -89,6 +89,13 @@ public sealed class MongoContext
 
             await Alerts.Indexes.CreateOneAsync(new CreateIndexModel<Alert>(
                 Builders<Alert>.IndexKeys.Ascending(a => a.Status).Descending(a => a.CreatedAt)));
+
+            // Backs the newest-first keyset paging in NotificationRepository.GetPageAsync.
+            await Notifications.Indexes.CreateOneAsync(new CreateIndexModel<Notification>(
+                Builders<Notification>.IndexKeys
+                    .Ascending(n => n.UserId)
+                    .Descending(n => n.CreatedAt)
+                    .Descending(n => n.Id)));
         }
         catch
         {

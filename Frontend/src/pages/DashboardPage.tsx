@@ -18,6 +18,7 @@ import {
   HiCpuChip,
 } from 'react-icons/hi2';
 import { motion } from 'framer-motion';
+import { Link } from 'react-router-dom';
 import { DashboardAPI } from '@/services/api';
 import type { DashboardStats, Activity } from '@/types';
 import { useAuth } from '@/context';
@@ -160,7 +161,12 @@ export default function DashboardPage() {
 
       {/* Recent Activity */}
       <section>
-        <h3 className="text-lg font-semibold text-slate-800 dark:text-white mb-4">Recent Activity</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-slate-800 dark:text-white">Recent Activity</h3>
+          <Link to="/notifications" className="text-sm text-primary hover:underline">
+            View all
+          </Link>
+        </div>
 
         {activities.length === 0 ? (
           <div className="text-center py-12">

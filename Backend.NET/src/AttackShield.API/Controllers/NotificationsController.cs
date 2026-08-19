@@ -9,13 +9,36 @@ namespace AttackShield.Api.Controllers;
 [Authorize]
 public sealed class NotificationsController : ApiControllerBase
 {
+    public const int DefaultPageSize = 10;
+    public const int MaxPageSize = 50;
+
     private readonly INotificationRepository _notifications;
 
     public NotificationsController(INotificationRepository notifications) => _notifications = notifications;
 
     [HttpGet]
-    public async Task<IActionResult> GetAll(CancellationToken ct)
-        => Ok((await _notifications.GetAllNewestAsync(OwnerId, ct)).Select(Map));
+    public async Task<IActionResult> GetAll([FromQuery] int? limit, [FromQuery] string? cursor, CancellationToken ct)
+    {
+        DateTime? before = null;
+        string? beforeId = null;
+        if (!string.IsNullOrEmpty(cursor))
+        {
+            if (!NotificationCursor.TryDecode(cursor, out before, out beforeId))
+                return Fail("Invalid cursor");
+        }
+
+        var size = Math.Clamp(limit ?? DefaultPageSize, 1, MaxPageSize);
+        var page = await _notifications.GetPageAsync(OwnerId, before, beforeId, size, ct);
+        var last = page.Items.Count > 0 ? page.Items[^1] : null;
+
+        return Ok(new
+        {
+            success = true,
+            items = page.Items.Select(MapSummary),
+            hasMore = page.HasMore,
+            nextCursor = page.HasMore && last is not null ? NotificationCursor.Encode(last) : null,
+        });
+    }
 
     [HttpGet("unread-count")]
     public async Task<IActionResult> GetUnreadCount(CancellationToken ct)
@@ -110,6 +133,22 @@ public sealed class NotificationsController : ApiControllerBase
         notification.Icon,
         notification.Location,
         notification.ImageUrl,
+        notification.IsRead,
+        notification.CreatedAt,
+        time = notification.CreatedAt.ToLocalTime().ToString("G"),
+    };
+
+    // ImageUrl is an inline base64 JPEG, so a page of these dwarfs everything else on the wire.
+    // List rows omit it; the details view fetches the single notification to get it.
+    private static object MapSummary(Notification notification) => new
+    {
+        _id = notification.Id,
+        id = notification.Id,
+        notification.Type,
+        notification.Title,
+        notification.Description,
+        notification.Icon,
+        notification.Location,
         notification.IsRead,
         notification.CreatedAt,
         time = notification.CreatedAt.ToLocalTime().ToString("G"),

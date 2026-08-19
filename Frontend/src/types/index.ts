@@ -233,6 +233,13 @@ export interface ApiResponse<T> {
   message?: string;
 }
 
+/** One page of a newest-first feed. `nextCursor` is null once the end is reached. */
+export interface Paginated<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
 export interface LoginResponse {
   token: string;
   user: User;

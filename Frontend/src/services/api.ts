@@ -8,6 +8,7 @@ import { API_CONFIG, APP_CONFIG } from '@/config';
 import { UserStorage } from './storage';
 import type {
   ApiResponse,
+  Paginated,
   LoginResponse,
   LoginFormData,
   UserSignupFormData,
@@ -294,10 +295,28 @@ export const AdminAPI = {
 
 // ─── Notifications API ─────────────────────────────────────────────
 export const NotificationsAPI = {
-  getAll() {
-    return safeRequest<NotificationItem[]>(() =>
-      api.get('/api/notifications'),
+  getPage(params: { limit?: number; cursor?: string } = {}) {
+    return safeRequest<Paginated<NotificationItem>>(() =>
+      api.get('/api/notifications', { params }),
     );
+  },
+
+  async getById(id: string): Promise<ApiResponse<NotificationItem>> {
+    const response = await safeRequest<{
+      success: boolean;
+      data?: NotificationItem;
+      error?: string;
+    }>(() => api.get(`/api/notifications/${id}`));
+
+    if (!response.success || !response.data?.success || !response.data.data) {
+      return {
+        success: false,
+        error:
+          response.error || response.data?.error || 'Failed to load notification',
+      };
+    }
+
+    return { success: true, data: response.data.data };
   },
 
   markAsRead(id: string) {
