@@ -17,6 +17,7 @@ import type {
   NotificationItem,
   AuthorityAlert,
   AppSettings,
+  EmailCooldown,
   UserCamera,
   EnsembleMetrics,
   TrustScore,
@@ -243,6 +244,12 @@ export const SettingsAPI = {
   update(settings: Partial<AppSettings>) {
     return safeRequest<AppSettings>(() =>
       api.put('/api/settings', { settings }),
+    );
+  },
+
+  getEmailCooldown() {
+    return safeRequest<{ success: boolean; data: EmailCooldown }>(() =>
+      api.get('/api/settings/email-cooldown'),
     );
   },
 };

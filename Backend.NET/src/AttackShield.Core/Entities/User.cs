@@ -155,6 +155,10 @@ public class NotificationSettings
 
     [BsonElement("vibration")]
     public bool Vibration { get; set; } = true;
+
+    // Opt-in: existing documents have no "email" field and so deserialize to false.
+    [BsonElement("email")]
+    public bool Email { get; set; } = false;
 }
 
 public class DetectionSettings

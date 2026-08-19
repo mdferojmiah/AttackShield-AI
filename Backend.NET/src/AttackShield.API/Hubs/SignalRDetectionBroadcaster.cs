@@ -25,6 +25,12 @@ public sealed class SignalRDetectionBroadcaster : IDetectionBroadcaster
     public Task AlertCreatedAsync(object payload, string? userId)
         => SendAsync("alert-created", payload, userId, includeAuthorities: true);
 
+    // Only the recipient cares about their own throttle, so this one skips the admin group.
+    public Task EmailCooldownAsync(object payload, string? userId)
+        => string.IsNullOrWhiteSpace(userId)
+            ? Task.CompletedTask
+            : _hub.Clients.Group(DetectionHub.GroupForUser(userId)).SendAsync("email-cooldown", payload);
+
     private Task SendAsync(string eventName, object payload, string? userId, bool includeAuthorities = false)
     {
         var groups = new List<string> { DetectionHub.GroupForRole("admin") };

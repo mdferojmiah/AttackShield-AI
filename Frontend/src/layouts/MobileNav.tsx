@@ -19,6 +19,7 @@ import {
   HiUsers,
 } from 'react-icons/hi2';
 import { useAuth } from '@/context';
+import { EmailCooldownBadge } from '@/components';
 
 export default function MobileNav() {
   const { user, logout } = useAuth();
@@ -62,12 +63,15 @@ export default function MobileNav() {
           <HiShieldCheck className="text-primary" size={22} />
           <span className="text-sm font-bold text-slate-800 dark:text-white">WDS</span>
         </div>
-        <button
-          onClick={() => setMenuOpen(!menuOpen)}
-          className="p-2 text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white"
-        >
-          {menuOpen ? <HiXMark size={22} /> : <HiBars3 size={22} />}
-        </button>
+        <div className="flex items-center gap-2">
+          <EmailCooldownBadge variant="compact" />
+          <button
+            onClick={() => setMenuOpen(!menuOpen)}
+            className="p-2 text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white"
+          >
+            {menuOpen ? <HiXMark size={22} /> : <HiBars3 size={22} />}
+          </button>
+        </div>
       </header>
 
       {/* Slide-down menu */}

@@ -275,4 +275,36 @@ public class DetectionsControllerTests
         _broadcaster.Verify(b => b.DetectionOverlayAsync(It.IsAny<object>(), ValidUserId), Times.Once);
         _broadcaster.Verify(b => b.WeaponDetectedAsync(It.IsAny<object>(), ValidUserId), Times.Once);
     }
+
+    // ── Email fanout opt-in ─────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Receive_Weapon_LooksUpUserOnceForEmailFanout(bool emailEnabled)
+    {
+        var user = new User { Id = ValidUserId, Email = "operator@example.com" };
+        user.Settings.Notifications.Email = emailEnabled;
+        _users.Setup(u => u.GetByIdAsync(ValidUserId, It.IsAny<CancellationToken>())).ReturnsAsync(user);
+        _detections
+            .Setup(d => d.FindRecentAsync("pistol", "Lobby", It.IsAny<DateTime>(), null, ValidUserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Detection?)null);
+
+        var result = await Sut().Receive(Req(userId: ValidUserId), CancellationToken.None);
+
+        Prop(result, "success").Should().Be(true);
+        _users.Verify(u => u.GetByIdAsync(ValidUserId, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Receive_Weapon_AnonymousDetection_SkipsUserLookup()
+    {
+        _detections
+            .Setup(d => d.FindRecentAsync("pistol", "Lobby", It.IsAny<DateTime>(), null, null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Detection?)null);
+
+        await Sut().Receive(Req(), CancellationToken.None);
+
+        _users.Verify(u => u.GetByIdAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

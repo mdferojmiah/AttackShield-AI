@@ -18,7 +18,7 @@ import {
 } from 'react-icons/hi2';
 import { SettingsAPI } from '@/services/api';
 import { UserStorage, SettingsStorage } from '@/services/storage';
-import { useAuth, useTheme } from '@/context';
+import { useAuth, useTheme, useEmailCooldown } from '@/context';
 import { useDocumentTitle } from '@/hooks';
 import { LoadingSpinner } from '@/components';
 import type { AppSettings } from '@/types';
@@ -31,9 +31,10 @@ export default function SettingsPage() {
 
   const { user, logout } = useAuth();
   const { isDark, toggle: toggleTheme } = useTheme();
+  const { cooldownMinutes, refresh: refreshEmailCooldown } = useEmailCooldown();
 
   const [settings, setSettings] = useState<AppSettings>({
-    notifications: { push: true, sound: true, vibration: true },
+    notifications: { push: true, sound: true, vibration: true, email: false },
     detection: { sensitivity: 'medium', alertThreshold: 5 },
     app: { theme: isDark ? 'dark' : 'light' },
     notificationsEnabled: true,
@@ -42,6 +43,7 @@ export default function SettingsPage() {
     darkMode: isDark,
     soundEnabled: true,
     vibrationEnabled: true,
+    emailNotifications: false,
     autoStartMonitoring: false,
   });
   const [loading, setLoading] = useState(true);
@@ -89,6 +91,9 @@ export default function SettingsPage() {
     } catch {
       // saved locally, silent
     }
+
+    // Turning email alerts off must clear the navbar countdown, and on must restore it.
+    if (key === 'emailNotifications') refreshEmailCooldown();
   };
 
   const handleClearData = () => {
@@ -157,6 +162,20 @@ export default function SettingsPage() {
           description="Play a sound for new alerts"
           value={settings.soundEnabled ?? true}
           onChange={(v) => updateSetting('soundEnabled', v)}
+        />
+        <ToggleRow
+          icon={<HiEnvelope size={20} />}
+          label="Email Alerts"
+          description={
+            (user?.email
+              ? `Send detection alerts to ${user.email}`
+              : 'Send detection alerts to your email') +
+            (cooldownMinutes > 0
+              ? ` · max one email per alert type every ${cooldownMinutes} min`
+              : '')
+          }
+          value={settings.emailNotifications ?? false}
+          onChange={(v) => updateSetting('emailNotifications', v)}
         />
       </section>
 

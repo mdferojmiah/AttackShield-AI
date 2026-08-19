@@ -11,4 +11,7 @@ public interface IDetectionBroadcaster
     Task WeaponDetectedAsync(object payload, string? userId);
     Task NotificationCreatedAsync(object payload, string? userId);
     Task AlertCreatedAsync(object payload, string? userId);
+
+    /// <summary>Email alert throttle state, so the UI can count down to the next send.</summary>
+    Task EmailCooldownAsync(object payload, string? userId);
 }

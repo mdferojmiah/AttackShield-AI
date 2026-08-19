@@ -18,6 +18,7 @@ import {
   HiUsers,
 } from 'react-icons/hi2';
 import { useAuth } from '@/context';
+import { EmailCooldownBadge } from '@/components';
 
 interface NavItem {
   path: string;
@@ -96,6 +97,7 @@ export default function Sidebar() {
 
       {/* User profile & logout */}
       <div className="border-t border-light-border dark:border-dark-border px-4 py-4">
+        <EmailCooldownBadge />
         <div className="flex items-center gap-3 mb-3">
           <div className="w-9 h-9 rounded-full bg-primary flex items-center justify-center text-white font-semibold text-sm">
             {user?.name?.charAt(0).toUpperCase() || 'U'}

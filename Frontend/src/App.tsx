@@ -1,6 +1,12 @@
 import React from 'react';
 import { Toaster } from 'react-hot-toast';
-import { AuthProvider, SocketProvider, ThemeProvider, CameraProvider } from '@/context';
+import {
+  AuthProvider,
+  SocketProvider,
+  ThemeProvider,
+  CameraProvider,
+  EmailCooldownProvider,
+} from '@/context';
 import { ErrorBoundary } from '@/components';
 import AppRoutes from '@/routes';
 
@@ -10,9 +16,11 @@ export default function App() {
       <ThemeProvider>
         <AuthProvider>
           <SocketProvider>
-            <CameraProvider>
-              <AppRoutes />
-            </CameraProvider>
+            <EmailCooldownProvider>
+              <CameraProvider>
+                <AppRoutes />
+              </CameraProvider>
+            </EmailCooldownProvider>
             <Toaster
               position="top-right"
               toastOptions={{

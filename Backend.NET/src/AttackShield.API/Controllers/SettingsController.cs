@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AttackShield.Core.Entities;
 using AttackShield.Core.Interfaces;
+using AttackShield.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,8 +11,13 @@ namespace AttackShield.Api.Controllers;
 public sealed class SettingsController : ApiControllerBase
 {
     private readonly IUserRepository _users;
+    private readonly NotificationFanout _fanout;
 
-    public SettingsController(IUserRepository users) => _users = users;
+    public SettingsController(IUserRepository users, NotificationFanout fanout)
+    {
+        _users = users;
+        _fanout = fanout;
+    }
 
     [HttpGet]
     public async Task<IActionResult> Get(CancellationToken ct)
@@ -40,6 +46,33 @@ public sealed class SettingsController : ApiControllerBase
         return Ok(new { success = true, data = ToFlat(user.Settings) });
     }
 
+    /// <summary>
+    /// Current email throttle for the caller, so a reloaded page can resume the
+    /// countdown instead of waiting for the next realtime event. State is in-memory
+    /// and resets when the API restarts.
+    /// </summary>
+    [HttpGet("email-cooldown")]
+    public async Task<IActionResult> EmailCooldown(CancellationToken ct)
+    {
+        var user = await GetUser(ct);
+        if (user is null) return Fail("User not found", 404);
+
+        var enabled = _fanout.EmailEnabled && user.Settings.Notifications.Email;
+        var active = enabled ? _fanout.PeekCooldown(user.Email) : null;
+
+        return Ok(new
+        {
+            success = true,
+            data = new
+            {
+                enabled,
+                cooldownMinutes = _fanout.CooldownMinutes,
+                alertType = active?.Type,
+                nextAllowedAt = active?.NextAllowedAt.ToString("o"),
+            },
+        });
+    }
+
     private Task<User?> GetUser(CancellationToken ct)
         => CurrentUserId is null ? Task.FromResult<User?>(null) : _users.GetByIdAsync(CurrentUserId, ct);
 
@@ -51,6 +84,7 @@ public sealed class SettingsController : ApiControllerBase
         notificationsEnabled = settings.Notifications.Push,
         soundEnabled = settings.Notifications.Sound,
         vibrationEnabled = settings.Notifications.Vibration,
+        emailNotifications = settings.Notifications.Email,
         detectionSensitivity = settings.Detection.Sensitivity,
         alertThreshold = settings.Detection.AlertThreshold,
         darkMode = settings.App.Theme == "dark",
@@ -64,6 +98,7 @@ public sealed class SettingsController : ApiControllerBase
             SetBool(value, "push", v => settings.Notifications.Push = v);
             SetBool(value, "sound", v => settings.Notifications.Sound = v);
             SetBool(value, "vibration", v => settings.Notifications.Vibration = v);
+            SetBool(value, "email", v => settings.Notifications.Email = v);
         });
         MergeGroup(updates, "detection", value =>
         {
@@ -76,6 +111,7 @@ public sealed class SettingsController : ApiControllerBase
         SetBool(updates, "notificationsEnabled", v => settings.Notifications.Push = v);
         SetBool(updates, "soundEnabled", v => settings.Notifications.Sound = v);
         SetBool(updates, "vibrationEnabled", v => settings.Notifications.Vibration = v);
+        SetBool(updates, "emailNotifications", v => settings.Notifications.Email = v);
         SetString(updates, "detectionSensitivity", v => settings.Detection.Sensitivity = v);
         SetInt(updates, "alertThreshold", v => settings.Detection.AlertThreshold = v);
         SetBool(updates, "darkMode", v => settings.App.Theme = v ? "dark" : "light");

@@ -92,6 +92,7 @@ export interface NotificationSettings {
   push: boolean;
   sound: boolean;
   vibration: boolean;
+  email: boolean;
 }
 
 export interface DetectionSettings {
@@ -107,10 +108,21 @@ export interface AppSettings {
   notificationsEnabled?: boolean;
   soundEnabled?: boolean;
   vibrationEnabled?: boolean;
+  emailNotifications?: boolean;
   detectionSensitivity?: 'low' | 'medium' | 'high' | 'max';
   alertThreshold?: number;
   darkMode?: boolean;
   autoStartMonitoring?: boolean;
+}
+
+/** Email alert throttle. `nextAllowedAt` is an ISO-8601 UTC instant, null when idle. */
+export interface EmailCooldown {
+  enabled: boolean;
+  cooldownMinutes: number;
+  alertType?: string | null;
+  nextAllowedAt?: string | null;
+  /** Present only on realtime pushes: false means that alert's email was throttled. */
+  sent?: boolean;
 }
 
 // Dashboard Types

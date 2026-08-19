@@ -186,17 +186,15 @@ public sealed class DetectionsController : ApiControllerBase
                     createdAt = suspiciousAlert.CreatedAt,
                 }, validUserId);
                 await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "suspicious"), validUserId);
-                await PublishFanoutAsync(new
-                {
-                    type = "suspicious_activity",
-                    title = notif.Title,
-                    message = notif.Description,
-                    location,
-                    confidence,
-                    cameraName = camName,
-                    imageUrl = req.ImageUrl,
-                    createdAt = detection.CreatedAt,
-                }, validUserId, ct);
+                await PublishFanoutAsync(new AlertNotification(
+                    Type: "suspicious_activity",
+                    Title: notif.Title,
+                    Message: notif.Description,
+                    Location: location,
+                    Confidence: confidence,
+                    CameraName: camName,
+                    ImageUrl: req.ImageUrl,
+                    CreatedAt: detection.CreatedAt), validUserId, ct);
 
                 return Ok(new { success = true, detection = detection.Id, notification = notif.Id, alert = suspiciousAlert.Id });
             }
@@ -260,17 +258,15 @@ public sealed class DetectionsController : ApiControllerBase
                     timestamp = detection.CreatedAt,
                 }, validUserId);
                 await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "hit_list"), validUserId);
-                await PublishFanoutAsync(new
-                {
-                    type = "hit_list",
-                    title = hitNotification.Title,
-                    message = hitNotification.Description,
-                    location,
-                    confidence,
-                    cameraName = camName,
-                    imageUrl = req.ImageUrl,
-                    createdAt = detection.CreatedAt,
-                }, validUserId, ct);
+                await PublishFanoutAsync(new AlertNotification(
+                    Type: "hit_list",
+                    Title: hitNotification.Title,
+                    Message: hitNotification.Description,
+                    Location: location,
+                    Confidence: confidence,
+                    CameraName: camName,
+                    ImageUrl: req.ImageUrl,
+                    CreatedAt: detection.CreatedAt), validUserId, ct);
                 return Ok(new { success = true, detection = detection.Id, notification = hitNotification.Id, alert = hitAlert.Id });
             }
 
@@ -327,17 +323,15 @@ public sealed class DetectionsController : ApiControllerBase
                 imageUrl = alert.ImageUrl,
                 createdAt = alert.CreatedAt,
             }, validUserId);
-            await PublishFanoutAsync(new
-            {
-                type = "weapon",
-                title = weaponNotif.Title,
-                message = weaponNotif.Description,
-                location,
-                confidence,
-                cameraName = camName,
-                imageUrl = req.ImageUrl,
-                createdAt = detection.CreatedAt,
-            }, validUserId, ct);
+            await PublishFanoutAsync(new AlertNotification(
+                Type: "weapon",
+                Title: weaponNotif.Title,
+                Message: weaponNotif.Description,
+                Location: location,
+                Confidence: confidence,
+                CameraName: camName,
+                ImageUrl: req.ImageUrl,
+                CreatedAt: detection.CreatedAt), validUserId, ct);
             await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "weapon"), validUserId);
 
             return Ok(new { success = true, detection = detection.Id, notification = weaponNotif.Id, alert = alert.Id });
@@ -361,9 +355,23 @@ public sealed class DetectionsController : ApiControllerBase
             timestamp = DateTime.UtcNow.ToString("o"),
         };
 
-    private async Task PublishFanoutAsync(object payload, string? userId, CancellationToken ct)
+    private async Task PublishFanoutAsync(AlertNotification payload, string? userId, CancellationToken ct)
     {
-        var email = userId is null ? null : (await _users.GetByIdAsync(userId, ct))?.Email;
-        await _fanout.PublishAsync(payload, email, ct);
+        var user = userId is null ? null : await _users.GetByIdAsync(userId, ct);
+        // Email only when the user opted in; webhooks are unaffected.
+        var email = user?.Settings.Notifications.Email == true ? user.Email : null;
+        var state = await _fanout.PublishAsync(payload, email, ct);
+
+        // Let the UI show why a mail was skipped and when the next one is due.
+        if (state.Considered && state.NextAllowedAt is { } nextAllowedAt)
+        {
+            await _broadcaster.EmailCooldownAsync(new
+            {
+                alertType = payload.Type,
+                sent = state.Sent,
+                nextAllowedAt = nextAllowedAt.ToString("o"),
+                cooldownMinutes = state.CooldownMinutes,
+            }, userId);
+        }
     }
 }
