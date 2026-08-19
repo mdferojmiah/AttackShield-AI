@@ -15,9 +15,9 @@ namespace AttackShield.Api.Hubs;
 ///     <see cref="IDetectionBroadcaster"/>. Event names match the Socket.IO originals
 ///     ("detection-started", "weapon-detected", ...) so the client swap is drop-in.
 ///
-/// The original tracked sockets per user and, when the last socket for a user
-/// disconnected, told the AI service to stop. We keep that behaviour: connections
-/// are counted per userId and StopDetection is sent when the count hits zero.
+/// Connections are tracked per user for group membership and diagnostics. A
+/// transient browser or network disconnect must not stop camera jobs; the Live
+/// Feed page explicitly owns detection shutdown.
 /// </summary>
 [Authorize]
 public sealed class DetectionHub : Hub
@@ -61,8 +61,7 @@ public sealed class DetectionHub : Hub
                 aiStreamUrl = $"{backendBase}/streams/{userId}-{payload.CameraId}/index.m3u8";
             }
 
-            // Track this connection against the user so we can stop detection when the
-            // user's last connection drops (see OnDisconnectedAsync).
+            // Track this connection against the user for group membership.
             if (!string.IsNullOrEmpty(userId))
             {
                 var set = UserConnections.GetOrAdd(userId, _ => new ConcurrentDictionary<string, byte>());
@@ -156,17 +155,14 @@ public sealed class DetectionHub : Hub
     {
         _logger.LogInformation("User disconnected: {ConnectionId}", Context.ConnectionId);
 
-        // Find which user this connection belonged to and drop it. When a user has
-        // no remaining connections, tell the AI service to stop (matches server.js).
+        // Remove the connection from the tracked set. SignalR automatic reconnects
+        // and page transitions can briefly disconnect without ending detection.
         foreach (var (userId, connections) in UserConnections)
         {
             if (connections.TryRemove(Context.ConnectionId, out _) && connections.IsEmpty)
             {
                 UserConnections.TryRemove(userId, out _);
-                _logger.LogInformation("[Socket] All connections for user {User} gone. Stopping detection.", userId);
-                var stop = await _ai.StopDetectionAsync();
-                if (!stop.Success)
-                    _logger.LogError("[AI] Error stopping detection: {Error}", stop.Error);
+                _logger.LogInformation("[Socket] All connections for user {User} gone.", userId);
             }
         }
 

@@ -3,6 +3,7 @@ using AttackShield.Api.Hubs;
 using AttackShield.Core.DTOs;
 using AttackShield.Core.Entities;
 using AttackShield.Core.Interfaces;
+using AttackShield.Infrastructure.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -22,12 +23,17 @@ public class DetectionsControllerTests
     private readonly Mock<INotificationRepository> _notifications = new();
     private readonly Mock<IAlertRepository> _alerts = new();
     private readonly Mock<IDetectionBroadcaster> _broadcaster = new();
+    private readonly Mock<IUserRepository> _users = new();
+    private readonly NotificationFanout _fanout = new(
+        Mock.Of<IHttpClientFactory>(),
+        Microsoft.Extensions.Options.Options.Create(new NotificationFanoutOptions()),
+        NullLogger<NotificationFanout>.Instance);
 
     private const string ValidUserId = "507f1f77bcf86cd799439011";
 
     private DetectionsController Sut() => new(
         _detections.Object, _notifications.Object, _alerts.Object,
-        _broadcaster.Object, NullLogger<DetectionsController>.Instance);
+        _users.Object, _broadcaster.Object, _fanout, NullLogger<DetectionsController>.Instance);
 
     private static ReceiveDetectionRequest Req(
         string? weaponType = "pistol",

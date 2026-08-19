@@ -14,22 +14,33 @@ internal sealed class MjpegViewer
 
     public volatile bool Dead;
 
-    /// <summary>Writes a full multipart chunk (header + frame + trailing CRLF).</summary>
-    public async Task WriteFrameAsync(byte[] header, byte[] frame)
+    /// <summary>
+    /// Writes a full multipart chunk (header + frame + trailing CRLF).
+    /// Returns false without writing when the previous frame is still in flight,
+    /// so one stalled client cannot hold up the fan-out for every other viewer.
+    /// </summary>
+    public async Task<bool> TryWriteFrameAsync(byte[] header, byte[] frame)
     {
-        if (Dead) return;
+        if (Dead) return false;
 
-        await _gate.WaitAsync().ConfigureAwait(false);
+        // Non-blocking acquire: a client that has not drained the previous frame
+        // simply skips this one rather than back-pressuring the stdout pump.
+        if (!await _gate.WaitAsync(0).ConfigureAwait(false))
+            return false;
+
         try
         {
-            await _output.WriteAsync(header).ConfigureAwait(false);
-            await _output.WriteAsync(frame).ConfigureAwait(false);
-            await _output.WriteAsync(MjpegTrailer).ConfigureAwait(false);
-            await _output.FlushAsync().ConfigureAwait(false);
+            using var timeout = new CancellationTokenSource(WriteTimeout);
+            await _output.WriteAsync(header, timeout.Token).ConfigureAwait(false);
+            await _output.WriteAsync(frame, timeout.Token).ConfigureAwait(false);
+            await _output.WriteAsync(MjpegTrailer, timeout.Token).ConfigureAwait(false);
+            await _output.FlushAsync(timeout.Token).ConfigureAwait(false);
+            return true;
         }
         catch
         {
             Dead = true;
+            return false;
         }
         finally
         {
@@ -37,5 +48,6 @@ internal sealed class MjpegViewer
         }
     }
 
+    private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
     private static readonly byte[] MjpegTrailer = { 0x0D, 0x0A }; // CRLF
 }

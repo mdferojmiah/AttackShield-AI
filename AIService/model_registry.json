@@ -1,0 +1,40 @@
+{
+  "models": [
+    {
+      "name": "weapon-yolov10",
+      "version": "current",
+      "path": "D:\\Code\\Final Thesis\\AttackShield-AI\\Yolov10\\model.pt",
+      "sha256": null,
+      "status": "valid",
+      "activated_at": null,
+      "validation_error": null
+    },
+    {
+      "name": "knife-verifier",
+      "version": "yolo11n",
+      "path": "D:\\Code\\Final Thesis\\AttackShield-AI\\AIService\\yolo11n.pt",
+      "sha256": null,
+      "status": "valid",
+      "activated_at": null,
+      "validation_error": null
+    },
+    {
+      "name": "face-recognition",
+      "version": "sface-2021dec",
+      "path": "D:\\Code\\Final Thesis\\AttackShield-AI\\AIService\\face_recognition_sface_2021dec.onnx",
+      "sha256": null,
+      "status": "valid",
+      "activated_at": null,
+      "validation_error": null
+    },
+    {
+      "name": "face-detection",
+      "version": "yunet-2023mar",
+      "path": "D:\\Code\\Final Thesis\\AttackShield-AI\\AIService\\face_detection_yunet_2023mar.onnx",
+      "sha256": null,
+      "status": "valid",
+      "activated_at": null,
+      "validation_error": null
+    }
+  ]
+}

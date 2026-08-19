@@ -39,13 +39,14 @@ export default function LiveFeedPage() {
     useCameras();
 
   const [liveCameraIds, setLiveCameraIds] = useState<Set<string>>(new Set());
+  const detectionRequestedRef = useRef<Set<string>>(new Set());
   const [detectionAlert, setDetectionAlert] = useState<{
     type?: 'weapon' | 'hit_list';
     weaponType: string;
     confidence: number;
     cameraName?: string;
   } | null>(null);
-  const { socket, sendDetectionRequest, stopDetectionRequest } = useSocket();
+  const { socket, connectionEpoch, sendDetectionRequest, stopDetectionRequest } = useSocket();
 
   // Add camera form
   const [showAddForm, setShowAddForm] = useState(false);
@@ -78,26 +79,37 @@ export default function LiveFeedPage() {
   useEffect(() => {
     if (!loaded || cameras.length === 0) return;
 
+    let cancelled = false;
+
     const startStreams = async () => {
       // Start DB-backed streams (primary + extra cameras)
       await StreamAPI.startAll().catch((err) =>
         console.warn('Could not start streams:', err),
       );
 
+      if (cancelled) {
+        await StreamAPI.stopAll().catch(() => {});
+        return;
+      }
+
       // Also restart any local webcam cameras (not stored in DB)
       for (const cam of cameras) {
+        if (cancelled) break;
         if (cam.id?.startsWith('webcam')) {
           const deviceName =
             cam.stream_url?.replace('webcam:', '') || 'Integrated Camera';
           await StreamAPI.startWebcam(cam.id, deviceName).catch(() => {});
         }
       }
+
+      if (cancelled) await StreamAPI.stopAll().catch(() => {});
     };
 
     startStreams();
 
     // Stop all streams when we leave this page
     return () => {
+      cancelled = true;
       stopDetectionRequest();
       StreamAPI.stopAll().catch((err) =>
         console.warn('Could not stop streams:', err),
@@ -128,32 +140,46 @@ export default function LiveFeedPage() {
     };
   }, [socket]);
 
-  // Send detection requests when streams are ready
+  // Send detection requests when streams and SignalR are both ready. The live
+  // image can load before SignalR connects, so this effect must retry on socket
+  // state changes instead of treating onPlaying as a one-shot trigger.
+  // connectionEpoch changes on every (re)connect: the backend loses the
+  // detection session when the hub connection is replaced, so the bookkeeping
+  // is cleared and the requests are re-sent.
   useEffect(() => {
-    if (liveCameraIds.size > 0 && userName && socket?.connected) {
-      cameras.filter((cam) => liveCameraIds.has(cam.id)).forEach((cam) => {
-        // For webcam cameras, pass the HLS URL so the AI service reads
-        // from FFmpeg's output instead of trying to open the device directly
-        let streamUrl = cam.stream_url;
-        if (cam.stream_url?.startsWith('webcam:')) {
-          streamUrl = `${API_CONFIG.BASE_URL}/streams/${cam.id}/index.m3u8`;
-        }
-        sendDetectionRequest({
-          stream_url: streamUrl,
-          user: userName,
-          location: cam.location,
-          camera_name: cam.camera_name,
-          camera_id: cam.id,
-        });
+    if (!socket?.connected) return;
+    detectionRequestedRef.current.clear();
+  }, [connectionEpoch, socket]);
+
+  useEffect(() => {
+    if (liveCameraIds.size === 0 || !userName || !socket?.connected) return;
+
+    cameras.filter((cam) => liveCameraIds.has(cam.id)).forEach((cam) => {
+      if (detectionRequestedRef.current.has(cam.id)) return;
+
+      // For webcam cameras, pass the HLS URL so the AI service reads
+      // from FFmpeg's output instead of trying to open the device directly.
+      let streamUrl = cam.stream_url;
+      if (cam.stream_url?.startsWith('webcam:')) {
+        streamUrl = `${API_CONFIG.BASE_URL}/streams/${cam.id}/index.m3u8`;
+      }
+      detectionRequestedRef.current.add(cam.id);
+      sendDetectionRequest({
+        stream_url: streamUrl,
+        user: userName,
+        location: cam.location,
+        camera_name: cam.camera_name,
+        camera_id: cam.id,
       });
-    }
-  }, [liveCameraIds, cameras, userName, socket, sendDetectionRequest]);
+    });
+  }, [liveCameraIds, cameras, userName, socket, connectionEpoch, sendDetectionRequest]);
 
   const handleCameraPlaying = (cameraId: string) => {
     setLiveCameraIds((prev) => new Set(prev).add(cameraId));
   };
 
   const handleCameraStopped = (cameraId: string) => {
+    detectionRequestedRef.current.delete(cameraId);
     setLiveCameraIds((prev) => {
       const next = new Set(prev);
       next.delete(cameraId);
@@ -519,6 +545,19 @@ function playAlarmSound(type: 'weapon' | 'hit_list' | 'suspicious') {
 }
 
 // ─── Camera Card with HLS Player + Stall Recovery ────────────────
+
+// 1×1 transparent GIF. Assigning this to <img>.src is the reliable way to make
+// the browser abort an in-flight multipart/x-mixed-replace request; `src = ''`
+// leaves the connection open in Chromium, and stale MJPEG connections quickly
+// exhaust the ~6-per-host budget so the next stream never loads.
+const BLANK_IMAGE =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+function releaseMjpeg(img: HTMLImageElement | null) {
+  if (!img) return;
+  img.src = BLANK_IMAGE;
+}
+
 interface CameraCardProps {
   camera: CameraData;
   onPlaying: () => void;
@@ -705,9 +744,15 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
   const streamOwnerId = storedUser?.id ?? storedUser?._id;
   const hlsUrl = `${API_CONFIG.BASE_URL}/streams/${streamOwnerId}-${camera.id}/index.m3u8`;
   const streamToken = UserStorage.getToken();
-  const mjpegUrl = `${API_CONFIG.BASE_URL}/api/stream/mjpeg/${camera.id}${
-    streamToken ? `?access_token=${encodeURIComponent(streamToken)}` : ''
+  const mjpegBaseUrl = `${API_CONFIG.BASE_URL}/api/stream/mjpeg/${camera.id}${
+    streamToken ? `?access_token=${encodeURIComponent(streamToken)}` : '?'
   }`;
+  // Every (re)connect gets a unique URL so the browser opens a fresh socket
+  // instead of reusing/queueing behind the previous multipart response.
+  const nextMjpegUrl = useCallback(
+    () => `${mjpegBaseUrl}${mjpegBaseUrl.endsWith('?') ? '' : '&'}t=${Date.now()}`,
+    [mjpegBaseUrl],
+  );
 
   // ── MJPEG reconnect on error ──────────────────────────────────────
   // Called when the browser's <img> HTTP connection to the MJPEG endpoint
@@ -720,8 +765,8 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
     onStoppedRef.current();
     setError('Camera display disconnected. Stream activity was stopped.');
     if (mjpegReconnectTimer.current) clearTimeout(mjpegReconnectTimer.current);
-    imgRef.current.src = '';
-  }, [mjpegUrl, camera.id, buffering]);
+    releaseMjpeg(imgRef.current);
+  }, [camera.id, buffering]);
 
   // Reset retry counter when stream loads successfully
   const handleMjpegLoad = useCallback(() => {
@@ -744,7 +789,10 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
         const res = await fetch(hlsUrl, { method: 'HEAD' });
         if (res.ok) {
           clearInterval(pollTimer);
-          if (imgRef.current) imgRef.current.src = mjpegUrl;
+          setError(null);
+          setBuffering(false);
+          onPlayingRef.current();
+          if (imgRef.current) imgRef.current.src = nextMjpegUrl();
         } else if (attempt >= maxAttempts) {
           clearInterval(pollTimer);
           onStoppedRef.current();
@@ -764,15 +812,15 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
     return () => {
       destroyed = true;
       clearInterval(pollTimer);
-      if (imgRef.current) imgRef.current.src = '';
+      releaseMjpeg(imgRef.current);
       if (mjpegReconnectTimer.current) clearTimeout(mjpegReconnectTimer.current);
     };
-  }, [hlsUrl, mjpegUrl, camera.id]);
+  }, [hlsUrl, nextMjpegUrl, camera.id]);
 
   const retry = useCallback(async () => {
     setError(null);
     setBuffering(true);
-    if (imgRef.current) imgRef.current.src = '';
+    releaseMjpeg(imgRef.current);
     try {
       if (camera.stream_url.startsWith('webcam:')) {
         await StreamAPI.startWebcam(camera.id, camera.stream_url.slice('webcam:'.length));
@@ -787,7 +835,10 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
         const res = await fetch(hlsUrl, { method: 'HEAD' });
         if (res.ok) {
           clearInterval(timer);
-          if (imgRef.current) imgRef.current.src = mjpegUrl;
+          setError(null);
+          setBuffering(false);
+          onPlayingRef.current();
+          if (imgRef.current) imgRef.current.src = nextMjpegUrl();
         }
       } catch { /* keep polling */ }
       if (attempt >= 30) {
@@ -797,7 +848,7 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
         setBuffering(false);
       }
     }, 500);
-  }, [hlsUrl, mjpegUrl, camera.id, camera.stream_url]);
+  }, [hlsUrl, nextMjpegUrl, camera.id, camera.stream_url]);
 
   return (
     <div className="card overflow-hidden">

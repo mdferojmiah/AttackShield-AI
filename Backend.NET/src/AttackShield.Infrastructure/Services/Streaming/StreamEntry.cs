@@ -8,7 +8,7 @@ namespace AttackShield.Infrastructure.Services.Streaming;
 /// Viewers are keyed in a concurrent dictionary (used as a set) so they can be
 /// added/removed from request threads while the stdout pump iterates them.
 /// </summary>
-internal sealed class StreamEntry
+internal sealed class StreamEntry : IDisposable
 {
     public StreamEntry(Process process, string rtspUrl)
     {
@@ -26,4 +26,26 @@ internal sealed class StreamEntry
     public volatile bool StopRequested;
 
     public ConcurrentDictionary<MjpegViewer, byte> Viewers { get; } = new();
+
+    /// <summary>
+    /// Cancelled when this stream shuts down. Attached MJPEG viewers link their
+    /// request token to this one so stopping the camera completes their HTTP
+    /// response instead of leaving it hanging until the browser gives up.
+    /// </summary>
+    private readonly CancellationTokenSource _shutdown = new();
+
+    public CancellationToken ShutdownToken
+        => _shutdown.IsCancellationRequested ? new CancellationToken(true) : _shutdown.Token;
+
+    public void SignalShutdown()
+    {
+        try { _shutdown.Cancel(); }
+        catch (ObjectDisposedException) { /* already torn down */ }
+    }
+
+    public void Dispose()
+    {
+        SignalShutdown();
+        _shutdown.Dispose();
+    }
 }

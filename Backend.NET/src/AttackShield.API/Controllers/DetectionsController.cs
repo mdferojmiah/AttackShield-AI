@@ -4,6 +4,7 @@ using AttackShield.Api.Hubs;
 using AttackShield.Core.DTOs;
 using AttackShield.Core.Entities;
 using AttackShield.Core.Interfaces;
+using AttackShield.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,7 +22,9 @@ public sealed class DetectionsController : ApiControllerBase
     private readonly IDetectionRepository _detections;
     private readonly INotificationRepository _notifications;
     private readonly IAlertRepository _alerts;
+    private readonly IUserRepository _users;
     private readonly IDetectionBroadcaster _broadcaster;
+    private readonly NotificationFanout _fanout;
     private readonly ILogger<DetectionsController> _logger;
 
     // Per-type minimum confidence; must be <= the AI service's own thresholds.
@@ -30,7 +33,10 @@ public sealed class DetectionsController : ApiControllerBase
         ["weapon"] = 0.60,
         ["suspicious_activity"] = 0.15,
         ["face"] = 0.35,
-        ["hit_list"] = 0.45,
+        // SFace cosine scores for the same person sit near 0.36, which is the
+        // AI service's HIT_LIST_MATCH_THRESHOLD. A higher gate here silently
+        // dropped genuine hit-list matches the AI service had already accepted.
+        ["hit_list"] = 0.36,
     };
 
     // Per-type de-dup window in seconds.
@@ -47,13 +53,17 @@ public sealed class DetectionsController : ApiControllerBase
         IDetectionRepository detections,
         INotificationRepository notifications,
         IAlertRepository alerts,
+        IUserRepository users,
         IDetectionBroadcaster broadcaster,
+        NotificationFanout fanout,
         ILogger<DetectionsController> logger)
     {
         _detections = detections;
         _notifications = notifications;
         _alerts = alerts;
+        _users = users;
         _broadcaster = broadcaster;
+        _fanout = fanout;
         _logger = logger;
     }
 
@@ -176,6 +186,17 @@ public sealed class DetectionsController : ApiControllerBase
                     createdAt = suspiciousAlert.CreatedAt,
                 }, validUserId);
                 await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "suspicious"), validUserId);
+                await PublishFanoutAsync(new
+                {
+                    type = "suspicious_activity",
+                    title = notif.Title,
+                    message = notif.Description,
+                    location,
+                    confidence,
+                    cameraName = camName,
+                    imageUrl = req.ImageUrl,
+                    createdAt = detection.CreatedAt,
+                }, validUserId, ct);
 
                 return Ok(new { success = true, detection = detection.Id, notification = notif.Id, alert = suspiciousAlert.Id });
             }
@@ -239,6 +260,17 @@ public sealed class DetectionsController : ApiControllerBase
                     timestamp = detection.CreatedAt,
                 }, validUserId);
                 await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "hit_list"), validUserId);
+                await PublishFanoutAsync(new
+                {
+                    type = "hit_list",
+                    title = hitNotification.Title,
+                    message = hitNotification.Description,
+                    location,
+                    confidence,
+                    cameraName = camName,
+                    imageUrl = req.ImageUrl,
+                    createdAt = detection.CreatedAt,
+                }, validUserId, ct);
                 return Ok(new { success = true, detection = detection.Id, notification = hitNotification.Id, alert = hitAlert.Id });
             }
 
@@ -295,6 +327,17 @@ public sealed class DetectionsController : ApiControllerBase
                 imageUrl = alert.ImageUrl,
                 createdAt = alert.CreatedAt,
             }, validUserId);
+            await PublishFanoutAsync(new
+            {
+                type = "weapon",
+                title = weaponNotif.Title,
+                message = weaponNotif.Description,
+                location,
+                confidence,
+                cameraName = camName,
+                imageUrl = req.ImageUrl,
+                createdAt = detection.CreatedAt,
+            }, validUserId, ct);
             await _broadcaster.DetectionOverlayAsync(BuildOverlay(req, detectionType, weaponType, confidence, "weapon"), validUserId);
 
             return Ok(new { success = true, detection = detection.Id, notification = weaponNotif.Id, alert = alert.Id });
@@ -317,4 +360,10 @@ public sealed class DetectionsController : ApiControllerBase
             sound,
             timestamp = DateTime.UtcNow.ToString("o"),
         };
+
+    private async Task PublishFanoutAsync(object payload, string? userId, CancellationToken ct)
+    {
+        var email = userId is null ? null : (await _users.GetByIdAsync(userId, ct))?.Email;
+        await _fanout.PublishAsync(payload, email, ct);
+    }
 }

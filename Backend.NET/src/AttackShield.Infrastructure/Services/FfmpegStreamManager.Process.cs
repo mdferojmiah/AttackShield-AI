@@ -72,11 +72,21 @@ public sealed partial class FfmpegStreamManager
             int code = SafeExitCode(process);
             _logger.LogInformation("[Stream] FFmpeg for camera {Camera} exited with code {Code}", cameraId, code);
             var wasStreaming = entry.HasOutput;
-            _streams.TryRemove(cameraId, out _);
+            var stopRequested = entry.StopRequested;
+
+            // Only drop the map slot if it still points at *this* entry: a restart
+            // may already have installed a newer process under the same id.
+            _streams.TryRemove(new KeyValuePair<string, StreamEntry>(cameraId, entry));
+
+            // Release any MJPEG viewers still parked on this entry, then dispose
+            // its token source.
+            foreach (var v in entry.Viewers.Keys)
+                v.Dead = true;
+            entry.Dispose();
 
             // Auto-restart when it was streaming and did not exit cleanly (0),
             // unless a caller intentionally stopped it.
-            if (wasStreaming && code != 0 && !entry.StopRequested && !_disposed)
+            if (wasStreaming && code != 0 && !stopRequested && !_disposed)
             {
                 _logger.LogInformation("[Stream][{Camera}] Unexpected exit — auto-restarting in 3s", cameraId);
                 _ = Task.Run(async () =>
@@ -121,17 +131,35 @@ public sealed partial class FfmpegStreamManager
     {
         lock (_lifecycleGate)
         {
-            if (!_streams.TryRemove(cameraId, out var entry))
+            if (!_streams.TryGetValue(cameraId, out var entry))
                 return;
 
+            // Flag the intent *before* removing the entry. The Exited handler reads
+            // this flag, so removing first left a window where an intentional stop
+            // looked like a crash and triggered a spurious 3s auto-restart — the
+            // orphan then fought the next StartAsync over the same HLS directory.
             entry.StopRequested = true;
+            _streams.TryRemove(new KeyValuePair<string, StreamEntry>(cameraId, entry));
+
             foreach (var v in entry.Viewers.Keys)
                 v.Dead = true;
+
+            // Completes every attached MJPEG request so the browser frees the
+            // connection instead of holding a dead multipart response open.
+            entry.SignalShutdown();
 
             if (entry.Process is { } p)
             {
                 _logger.LogInformation("[Stream] Stopping FFmpeg for camera {Camera}", cameraId);
                 TryKill(p);
+                try
+                {
+                    p.WaitForExit(2000);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The process may have exited between the kill and wait.
+                }
             }
         }
     }
@@ -235,7 +263,7 @@ public sealed partial class FfmpegStreamManager
 
         foreach (var viewer in entry.Viewers.Keys)
         {
-            await viewer.WriteFrameAsync(header, frame);
+            await viewer.TryWriteFrameAsync(header, frame);
             if (viewer.Dead)
                 entry.Viewers.TryRemove(viewer, out _);
         }

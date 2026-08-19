@@ -54,6 +54,12 @@ function createRealtimeClient(connection: HubConnection): RealtimeClient {
 
 interface SocketContextType {
   socket: RealtimeClient | null;
+  /**
+   * Increments on every successful (re)connect. Consumers that registered
+   * server-side state (e.g. an active detection session) should treat a change
+   * here as "the backend forgot about me" and re-register.
+   */
+  connectionEpoch: number;
   sendDetectionRequest: (payload: {
     stream_url: string;
     user: string;
@@ -81,6 +87,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
   const { isAuthenticated } = useAuth();
   const socketRef = useRef<RealtimeClient | null>(null);
   const [socket, setSocket] = useState<RealtimeClient | null>(null);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
 
   const sendDetectionRequest = useCallback((payload: {
     stream_url: string;
@@ -118,6 +125,8 @@ export function SocketProvider({ children }: SocketProviderProps) {
     }
 
     let disposed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
     const connection = new HubConnectionBuilder()
       .withUrl(`${API_CONFIG.BASE_URL}/hubs/detection`, {
         accessTokenFactory: () => UserStorage.getToken() || '',
@@ -128,16 +137,47 @@ export function SocketProvider({ children }: SocketProviderProps) {
     const s = createRealtimeClient(connection);
     socketRef.current = s;
     latestSocket = s;
-    void connection.start()
-      .then(() => {
-        if (!disposed) setSocket(s);
-      })
-      .catch((error) => {
-        if (!disposed) console.error('[SignalR] Connection error:', error);
-      });
+
+    // An automatic reconnect produces a brand-new hub connection server-side,
+    // so any detection session started on the old one is gone. Bump the epoch
+    // so consumers re-issue their requests.
+    connection.onreconnected(() => {
+      if (disposed) return;
+      console.log('[SignalR] Reconnected');
+      setConnectionEpoch((value) => value + 1);
+    });
+
+    // withAutomaticReconnect() only retries connections that succeeded at
+    // least once, so an initial failure (e.g. the frontend booted before the
+    // backend was listening) would otherwise leave `socket` null forever and
+    // silently disable every detection request. Retry the first connect
+    // ourselves with capped exponential backoff.
+    const attemptStart = () => {
+      if (disposed) return;
+      void connection.start()
+        .then(() => {
+          if (disposed) return;
+          attempt = 0;
+          setSocket(s);
+          setConnectionEpoch((value) => value + 1);
+          console.log('[SignalR] Connected');
+        })
+        .catch((error) => {
+          if (disposed) return;
+          attempt += 1;
+          const delay = Math.min(1000 * 2 ** (attempt - 1), 15000);
+          console.warn(
+            `[SignalR] Connection attempt ${attempt} failed; retrying in ${delay} ms`,
+            error,
+          );
+          retryTimer = setTimeout(attemptStart, delay);
+        });
+    };
+    attemptStart();
 
     return () => {
       disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
       console.log('[SignalR] Disconnecting');
       s.disconnect();
       socketRef.current = null;
@@ -147,7 +187,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
   }, [isAuthenticated]);
 
   return (
-    <SocketContext.Provider value={{ socket, sendDetectionRequest, stopDetectionRequest }}>
+    <SocketContext.Provider value={{ socket, connectionEpoch, sendDetectionRequest, stopDetectionRequest }}>
       {children}
     </SocketContext.Provider>
   );

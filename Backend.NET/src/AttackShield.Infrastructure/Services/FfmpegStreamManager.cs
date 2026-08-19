@@ -86,18 +86,24 @@ public sealed partial class FfmpegStreamManager : IStreamManager, IDisposable
         var viewer = new MjpegViewer(output);
         entry.Viewers[viewer] = 0;
 
+        // Link the client's request token with the stream's shutdown token so a
+        // StopAsync (or an FFmpeg exit) ends this HTTP response immediately. Left
+        // unlinked, the response stays open forever and the browser keeps burning
+        // one of its ~6 connections per host, which is what made re-opening the
+        // live feed appear to hang.
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, entry.ShutdownToken);
         try
         {
-            // Block until the client disconnects (token cancelled) or the stream stops.
-            await Task.Delay(Timeout.Infinite, ct);
+            await Task.Delay(Timeout.Infinite, linked.Token);
         }
         catch (OperationCanceledException)
         {
-            // Normal client disconnect.
+            // Normal client disconnect or stream shutdown.
         }
         finally
         {
             entry.Viewers.TryRemove(viewer, out _);
+            viewer.Dead = true;
         }
         return true;
     }

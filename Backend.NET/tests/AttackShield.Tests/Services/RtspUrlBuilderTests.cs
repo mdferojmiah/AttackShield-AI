@@ -72,6 +72,20 @@ public class RtspUrlBuilderTests
     }
 
     [Fact]
+    public void Build_SuppliedHikvision8554Details_ReturnsExpectedUrl()
+    {
+        var url = _sut.Build(
+            "192.168.10.30",
+            "admin",
+            "123456",
+            port: "8554",
+            brand: "Hikvision",
+            path: "/Streaming/Channels/101");
+
+        url.Should().Be("rtsp://admin:123456@192.168.10.30:8554/Streaming/Channels/101");
+    }
+
+    [Fact]
     public void Build_WithoutCredentials_OmitsUserInfo()
     {
         _sut.Build("10.0.0.5", "admin", null).Should().Be("rtsp://10.0.0.5:554/cam/realmonitor?channel=1&subtype=1");

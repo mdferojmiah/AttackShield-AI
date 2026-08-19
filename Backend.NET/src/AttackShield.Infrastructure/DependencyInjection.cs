@@ -20,6 +20,7 @@ public static class DependencyInjection
         services.Configure<AiOptions>(config.GetSection(AiOptions.SectionName));
         services.Configure<JwtOptions>(config.GetSection(JwtOptions.SectionName));
         services.Configure<StreamOptions>(config.GetSection(StreamOptions.SectionName));
+        services.Configure<NotificationFanoutOptions>(config.GetSection(NotificationFanoutOptions.SectionName));
 
         // Persistence
         services.AddSingleton<MongoContext>();
@@ -37,6 +38,7 @@ public static class DependencyInjection
 
         // Streaming (singleton — owns long-lived FFmpeg processes)
         services.AddSingleton<IStreamManager, FfmpegStreamManager>();
+        services.AddSingleton<NotificationFanout>();
 
         // AI service client
         services.AddHttpClient<IAiServiceClient, AiServiceClient>((sp, client) =>
