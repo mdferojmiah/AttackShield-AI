@@ -46,9 +46,15 @@ MODEL_REGISTRY_PATH = os.path.join(BASE_DIR, 'model_registry.json')
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Ultralytics device string for the weapon model. When the OpenVINO backend is
-# active the model is already compiled for CPU, and passing a torch device would
-# be ignored, so the plugin target is named explicitly.
+# active the model is compiled for a named plugin target, so it is resolved at
+# load time by _resolve_weapon_device() rather than assumed here.
+# Measured at imgsz=256 on this box: OpenVINO CPU 105.7 ms, Iris Xe iGPU 33.6 ms,
+# MX350 dGPU 356.7 ms. The iGPU is 3x faster than CPU *and* frees CPU cores for
+# the face pass; the discrete MX350 is far slower (2 GB, PCIe-starved) so it is
+# deliberately never used for this model.
 WEAPON_DEVICE = DEVICE if DEVICE == "cuda" else "intel:cpu"
+# OpenVINO plugin targets tried in order for the weapon model, best first.
+WEAPON_OPENVINO_DEVICE_ORDER = ("GPU.0", "GPU", "CPU")
 
 # Thread budget for a 4-physical-core CPU, chosen from measurement: with a
 # competing face thread, YOLO ran 803/607/535/515 ms at 1/2/3/4 torch threads,
@@ -149,7 +155,20 @@ HIT_LIST_CONFIRMATION_FRAMES = 2
 # detectors from saturating all 4 physical cores and starving each other.
 # Leaving idle headroom is what keeps per-pass latency near its solo cost.
 WEAPON_DETECTION_PERIOD_SECONDS = 0.50
-FACE_DETECTION_PERIOD_SECONDS = 0.10
+# 30 Hz, not 10 Hz. This is the single most important tracking parameter: a 70 px
+# face walking at ~450 px/s moves 45 px between 10 Hz passes, which leaves an
+# IoU of only 0.217 against the previous box. No tracker can associate that
+# (measured: stock ByteTrack held the ID for 1 of 12 frames at 10 Hz, but 36 of
+# 36 at 30 Hz, where the step is 15 px and IoU is 0.647). YuNet costs 8.8 ms, so
+# 30 Hz is 26.5% of one core - affordable, and it fixes the ID churn at source.
+FACE_DETECTION_PERIOD_SECONDS = 1.0 / 30.0
+# Hit-list recognition is rate-limited independently of face detection: SFace
+# alignCrop+feature costs 31.6 ms per face, which at 30 Hz would consume a whole
+# core per visible face. Identity does not change between frames, so 2 Hz is
+# ample; matches are cached for HIT_LIST_MATCH_TTL_SECONDS to keep the overlay
+# steady between passes.
+HIT_LIST_MATCH_PERIOD_SECONDS = 0.50
+HIT_LIST_MATCH_TTL_SECONDS = 1.50
 ACTIVITY_DETECTION_PERIOD_SECONDS = 2.00
 # Ceiling on the main loop's own rate (~30 fps). Bounds the loop when a VOD or
 # HLS source delivers frames faster than real time.
@@ -159,7 +178,13 @@ MAIN_LOOP_MIN_PERIOD_SECONDS = 1.0 / 30.0
 DUPLICATE_WINDOWS = {
     "weapon":             10,   # Resend weapon alert every 10 s
     "suspicious_activity": 30,  # Resend activity alert every 30 s
-    "face":               3,    # Resend face bbox every 3 s (keeps overlay alive)
+    # Faces are an overlay, not an alert: this window is what governs how often
+    # the on-screen box MOVES. At the old 3 s the box only stepped three times
+    # per ten seconds, so stable track ids were invisible to the user and any
+    # frontend TTL under 3 s made boxes blink out. 5 Hz keeps the box on the
+    # person; the backend still caps face rows at one per 30 s, so this costs
+    # traffic and no database growth.
+    "face":               0.2,
     "hit_list":          60,
 }
 I3D_CLIP_LENGTH = 16                   # Number of frames per I3D clip
@@ -180,23 +205,117 @@ SKIPPED_CLIP: list = []
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Face Tracker – IoU-based persistent identity assignment
+# Face Tracker – ByteTrack (Kalman motion model + Hungarian assignment)
 # ═══════════════════════════════════════════════════════════════════
+
+# ByteTrack tuning. Defaults ship in ultralytics' bytetrack.yaml but three of
+# them are wrong for a 30 Hz YuNet face feed:
+#   fuse_score      : default True multiplies IoU by the detection score, which
+#                     INFLATES the cost of a correct match on a fast-moving box
+#                     (measured: IoU 0.217 -> cost 0.804 > match_thresh 0.8, so
+#                     the match was rejected and a new ID minted). Off.
+#   match_thresh    : raised so a partially-overlapping box still associates.
+#   track_low_thresh: lowered so that if YuNet's own score gate
+#                     (FACE_SCORE_THRESHOLD) is ever relaxed, weak profile-view
+#                     boxes take part in the second association stage and hold
+#                     the identity through a head turn. Inert at the current 0.6
+#                     gate, which discards those boxes before they get here.
+# new_track_thresh stays high: a low-confidence box may CONTINUE a track but
+# must never CREATE one, which is what keeps YuNet's noise blobs out.
+BYTETRACK_FACE_ARGS = {
+    "track_high_thresh": 0.40,
+    "track_low_thresh": 0.15,
+    "new_track_thresh": 0.50,
+    "match_thresh": 0.95,
+    "fuse_score": False,
+    "track_buffer": 60,      # ~2 s of Kalman coasting at 30 Hz before a track dies
+}
+
+# ByteTrack associates on IoU alone, so overlap drops to exactly zero once a
+# face moves further than its own width between two DETECTIONS - measured cliff
+# is 0.93x the face width, and it is reached easily when YuNet misses a few
+# frames to motion blur while the person keeps walking. Boxes are therefore
+# grown for the association step only (never for display or recognition), which
+# widens that gate proportionally: measured 61px -> 154px per frame at 2.6x.
+# Two people converging head-on still kept separate IDs at this value.
+FACE_ASSOCIATION_INFLATION = 2.6
+
+# BaseTrack._count is a process-global counter and BYTETracker.__init__ resets
+# it, so constructing a tracker for a second camera would restart IDs at 1 and
+# collide with the first camera's live tracks. Construction is serialised and the
+# counter restored to keep IDs globally unique.
+_bytetrack_construction_lock = threading.Lock()
+
+
+class _FaceDetections:
+    """Indexable, Boxes-like view over face detections for BYTETracker.
+
+    BYTETracker slices its input (`results[mask]`) and reads `.xywh` / `.conf` /
+    `.cls` / `.xyxy`, so a plain namespace raises "not subscriptable". Boxes are
+    in pixel space because the Kalman filter's noise model scales with box size.
+
+    `cls` carries the index of each detection in the caller's original list.
+    ByteTrack preserves cls through association, so it is the exact way to map a
+    track back to the detection that produced it. The `idx` column in ByteTrack's
+    output cannot be used for this: it is an index into the high- or low-score
+    subset, not into the full input, so the two groups' values overlap.
+    """
+
+    def __init__(self, xywh, conf, cls):
+        self.xywh = np.asarray(xywh, dtype=np.float32).reshape(-1, 4)
+        self.conf = np.asarray(conf, dtype=np.float32).reshape(-1)
+        self.cls = np.asarray(cls, dtype=np.float32).reshape(-1)
+
+    @property
+    def xyxy(self):
+        centre = self.xywh
+        return np.stack([
+            centre[:, 0] - centre[:, 2] / 2,
+            centre[:, 1] - centre[:, 3] / 2,
+            centre[:, 0] + centre[:, 2] / 2,
+            centre[:, 1] + centre[:, 3] / 2,
+        ], axis=1)
+
+    def __len__(self):
+        return len(self.conf)
+
+    def __getitem__(self, index):
+        return _FaceDetections(self.xywh[index], self.conf[index], self.cls[index])
+
 
 class FaceTracker:
     """
-    Greedy IoU-based face tracker.
-    Assigns persistent IDs (Person 1, Person 2, …) to detected faces by
-    comparing bounding-box IoU across frames so that the same person always
-    keeps the same label throughout a detection session.
+    ByteTrack-based face tracker.
+
+    Assigns persistent IDs (Person 1, Person 2, …) using a Kalman motion model
+    and Hungarian assignment, so a walking face keeps its label instead of being
+    re-identified as a new person. Replaces a greedy last-seen-IoU matcher that
+    could not associate a box which moved further than its own width between
+    passes.
     """
 
-    def __init__(self, iou_threshold: float = 0.25, max_age: int = 30):
-        self._tracks: dict = {}         # track_id → {bbox, age}
-        self._next_id: int = 1
-        self._iou_threshold = iou_threshold
-        self._max_age = max_age         # frames before a track is considered gone
+    def __init__(self, frame_rate: int = 30):
+        from ultralytics.trackers.basetrack import BaseTrack
+        from ultralytics.trackers.byte_tracker import BYTETracker
+        from ultralytics.utils import IterableSimpleNamespace
+
+        self._args = IterableSimpleNamespace(**BYTETRACK_FACE_ARGS)
+        self._frame_rate = frame_rate
+        self._basetrack = BaseTrack
+        self._bytetracker_cls = BYTETracker
+        self._tracker = self._new_tracker()
+        # ByteTrack IDs are process-global and never restart, so they are mapped
+        # to per-session sequential numbers to keep "Person 1, Person 2" labels.
+        self._display_ids: dict = {}
+        self._next_display_id: int = 1
         self._lock = threading.Lock()
+
+    def _new_tracker(self):
+        with _bytetrack_construction_lock:
+            preserved = self._basetrack._count
+            tracker = self._bytetracker_cls(self._args, frame_rate=self._frame_rate)
+            self._basetrack._count = preserved
+        return tracker
 
     # ── helpers ───────────────────────────────────────────────────
     @staticmethod
@@ -217,62 +336,65 @@ class FaceTracker:
     def update(self, detections: list) -> list:
         """
         Match detections to existing tracks and assign stable labels.
-        Unmatched detections create new tracks.
-        Returns a new list with 'label' set to 'Person N'.
+        Returns only the detections ByteTrack confirmed as tracks, each with
+        'label' set to 'Person N' and 'track_id' set to the display id.
+        Detections without a bbox are passed through unchanged.
         """
+        passthrough = [dict(d) for d in detections if "bbox" not in d]
+        boxed = [d for d in detections if "bbox" in d]
+        if not boxed:
+            return passthrough
+
+        xywh, conf, cls = [], [], []
+        for index, det in enumerate(boxed):
+            bbox = det["bbox"]
+            # Normalised (top-left, w, h) -> pixel (centre, w, h).
+            width = bbox["w"] * GRAB_W
+            height = bbox["h"] * GRAB_H
+            xywh.append([bbox["x"] * GRAB_W + width / 2,
+                         bbox["y"] * GRAB_H + height / 2,
+                         # Inflated for association only; boxed[] keeps the real box.
+                         width * FACE_ASSOCIATION_INFLATION,
+                         height * FACE_ASSOCIATION_INFLATION])
+            conf.append(det.get("confidence", 0.0))
+            cls.append(index)
+
         with self._lock:
-            # Age existing tracks; remove stale ones
-            for tid in list(self._tracks):
-                self._tracks[tid]["age"] += 1
-                if self._tracks[tid]["age"] > self._max_age:
-                    del self._tracks[tid]
+            try:
+                tracked = self._tracker.update(_FaceDetections(xywh, conf, cls))
+            except Exception as exc:
+                print(f"[FaceTracker] ByteTrack update failed ({exc}); passing detections through")
+                return passthrough + [dict(d) for d in boxed]
 
             labeled = []
-            used_tids: set = set()
-
-            for det in detections:
-                if "bbox" not in det:
-                    labeled.append(dict(det))
+            for row in tracked:
+                source_index = int(round(float(row[6])))
+                if not 0 <= source_index < len(boxed):
                     continue
-
-                best_tid, best_iou = None, self._iou_threshold
-                for tid, track in self._tracks.items():
-                    if tid in used_tids:
-                        continue
-                    score = self._iou(det["bbox"], track["bbox"])
-                    if score > best_iou:
-                        best_iou, best_tid = score, tid
-
-                if best_tid is not None:
-                    # Update matched track
-                    self._tracks[best_tid]["bbox"] = det["bbox"]
-                    self._tracks[best_tid]["age"]  = 0
-                    used_tids.add(best_tid)
-                    label = f"Person {best_tid}"
-                else:
-                    # Register new person
-                    tid = self._next_id
-                    self._next_id += 1
-                    self._tracks[tid] = {"bbox": det["bbox"], "age": 0}
-                    used_tids.add(tid)
-                    label = f"Person {tid}"
-
-                new_det = dict(det)
-                new_det["label"] = label
+                track_id = int(row[4])
+                display_id = self._display_ids.get(track_id)
+                if display_id is None:
+                    display_id = self._next_display_id
+                    self._display_ids[track_id] = display_id
+                    self._next_display_id += 1
+                new_det = dict(boxed[source_index])
+                new_det["label"] = f"Person {display_id}"
+                new_det["track_id"] = display_id
                 labeled.append(new_det)
 
-            return labeled
+        return passthrough + labeled
 
     def reset(self):
         with self._lock:
-            self._tracks.clear()
-            self._next_id = 1
+            self._tracker = self._new_tracker()
+            self._display_ids.clear()
+            self._next_display_id = 1
 
     @property
     def unique_count(self) -> int:
         """Total unique persons ever seen in this session (never decreases)."""
         with self._lock:
-            return self._next_id - 1
+            return self._next_display_id - 1
 
 
 # ── Suspicious-activity keyword matching ────────────────────────────
@@ -338,10 +460,12 @@ class DetectionSession:
         self.i3d_frame_buffer = deque(maxlen=I3D_CLIP_LENGTH)
         self.i3d_frame_count = 0
         self.i3d_last_processed_count = 0
-        self.face_tracker = FaceTracker(iou_threshold=0.25, max_age=30)
+        self.face_tracker = FaceTracker(frame_rate=round(1.0 / FACE_DETECTION_PERIOD_SECONDS))
         self.hit_list = hit_list or []
         self.hit_list_embeddings = []
         self.hit_list_confirmations = {}
+        self.hit_list_matches = {}
+        self.hit_list_last_match_at = 0.0
         self.weapon_confirmations = {}
         self.last_detections = {}
         self.frame_count = 0
@@ -399,6 +523,24 @@ class StopDetectionRequest(BaseModel):
 # Model Loaders
 # ═══════════════════════════════════════════════════════════════════
 
+def _resolve_weapon_openvino_device():
+    """Pick the fastest available OpenVINO target for the weapon model.
+
+    Measured at imgsz=256: iGPU 33.6 ms vs CPU 105.7 ms, and the iGPU holds
+    ~32 ms even with R3D-18 sharing it. Returns an ultralytics device string.
+    """
+    try:
+        import openvino as ov
+        available = ov.Core().available_devices
+    except Exception as exc:
+        print(f"[YOLO] Could not enumerate OpenVINO devices ({exc}); using CPU")
+        return "intel:cpu"
+    for device in WEAPON_OPENVINO_DEVICE_ORDER:
+        if device in available:
+            return f"intel:{device.lower()}"
+    return "intel:cpu"
+
+
 def _openvino_weapon_model():
     """Return an OpenVINO-optimised weapon model, exporting it on first use.
 
@@ -424,7 +566,7 @@ def _openvino_weapon_model():
 
 def load_yolo_model():
     """Load YOLOv10 weapon detection model."""
-    global yolo_model, weapon_verifier_model, weapon_backend
+    global yolo_model, weapon_verifier_model, weapon_backend, WEAPON_DEVICE
     if yolo_model is not None and weapon_verifier_model is not None:
         return
     try:
@@ -435,7 +577,8 @@ def load_yolo_model():
             yolo_model = YOLO(MODEL_PATH)
             weapon_backend = DEVICE
         else:
-            weapon_backend = "openvino:cpu"
+            WEAPON_DEVICE = _resolve_weapon_openvino_device()
+            weapon_backend = WEAPON_DEVICE.replace("intel:", "openvino:")
         # The verifier stays on torch: it is a 5 MB nano model whose cost is
         # already small, so a second export would add startup time for nothing.
         weapon_verifier_model = YOLO(WEAPON_VERIFIER_PATH)
@@ -1031,6 +1174,7 @@ def match_hit_list(frame, face_detections, session):
             "label": best_entry["name"],
             "confidence": round(best_score, 3),
             "bbox": face["bbox"],
+            "track_id": face.get("track_id"),
             "priority": "high",
             "threat_level": "critical",
         })
@@ -1038,6 +1182,44 @@ def match_hit_list(frame, face_detections, session):
         if entry_id not in seen:
             session.hit_list_confirmations[entry_id] = 0
     return matches
+
+
+def _hit_list_detections(frame, face_detections, session):
+    """Hit-list matches for the current frame, recognising at a bounded rate.
+
+    SFace costs 31.6 ms per face, so running it on every 30 Hz face pass would
+    burn a core per visible person. Recognition runs at HIT_LIST_MATCH_PERIOD_
+    SECONDS and the resulting identity is cached against the tracker's id;
+    between passes the cached name is re-projected onto that track's current box
+    so the overlay still follows the person. This is the payoff for having stable
+    track ids: identity survives without re-running recognition.
+    """
+    if not session.hit_list_embeddings:
+        return []
+
+    now = time.monotonic()
+    if now - session.hit_list_last_match_at >= HIT_LIST_MATCH_PERIOD_SECONDS:
+        session.hit_list_last_match_at = now
+        fresh = match_hit_list(frame, face_detections, session)
+        for match in fresh:
+            track_id = match.get("track_id")
+            if track_id is not None:
+                session.hit_list_matches[track_id] = (match, now)
+        for track_id, (_, seen_at) in list(session.hit_list_matches.items()):
+            if now - seen_at > HIT_LIST_MATCH_TTL_SECONDS:
+                del session.hit_list_matches[track_id]
+        return fresh
+
+    cached = []
+    for face in face_detections:
+        entry = session.hit_list_matches.get(face.get("track_id"))
+        if entry is None:
+            continue
+        match, seen_at = entry
+        if now - seen_at > HIT_LIST_MATCH_TTL_SECONDS:
+            continue
+        cached.append({**match, "bbox": face["bbox"]})
+    return cached
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1146,6 +1328,12 @@ def _ensure_backend_sender():
 
 def _enqueue_backend_post(payload, det_type, label, confidence):
     _ensure_backend_sender()
+    # Face overlays are cosmetic and resent 5x/second, whereas a weapon alert is
+    # safety-critical and sent once. They share one queue with a drop-oldest
+    # policy, so under backend pressure faces are shed first to guarantee an
+    # alert can never be evicted by overlay traffic.
+    if det_type == "face" and _backend_queue.qsize() > BACKEND_QUEUE_MAX // 2:
+        return
     try:
         _backend_queue.put_nowait({
             "payload": payload,
@@ -1234,7 +1422,10 @@ def _open_ffmpeg_pipe(url: str):
         "-f",       "rawvideo",
         "-pix_fmt", "bgr24",
         "-s",       f"{GRAB_W}x{GRAB_H}",
-        "-r",       "15",       # cap to 15 fps – matches the HLS encode rate
+        # HLS is encoded at 15 fps upstream, but an RTSP camera is not: capping
+        # it at 15 doubles how far a face travels between two detections, which
+        # is what breaks IoU association and re-IDs a fast walker.
+        "-r",       "15" if is_hls else "30",
         "-an",                  # no audio
         "pipe:1",
     ]
@@ -1492,7 +1683,7 @@ def process_stream(session, rtsp_url):
                 if f is not None:
                     inference_started_at = time.monotonic()
                     dets = detect_faces(f, session.face_tracker)
-                    dets.extend(match_hit_list(f, dets, session))
+                    dets.extend(_hit_list_detections(f, dets, session))
                     face_latency.append((time.monotonic() - inference_started_at) * 1000)
                     with face_lock:
                         pending_face_dets.clear()

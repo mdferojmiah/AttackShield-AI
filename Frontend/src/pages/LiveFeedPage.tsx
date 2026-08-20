@@ -558,6 +558,23 @@ function releaseMjpeg(img: HTMLImageElement | null) {
   img.src = BLANK_IMAGE;
 }
 
+// How long a face box survives without a fresh detection. The AI resends each
+// tracked face every ~0.2 s, so 1 s tolerates dropped updates while still
+// clearing the box quickly once the person leaves. The old 8 s outlived the
+// detection feed by a wide margin and left ghost boxes on an empty scene.
+const FACE_BOX_TTL_MS = 1000;
+// Fraction of the remaining distance the drawn box closes each animation frame.
+const FACE_BOX_SMOOTHING = 0.25;
+
+type Box = { x: number; y: number; w: number; h: number };
+
+// True when two normalised boxes intersect at all. Used to spot a stale slot
+// left behind by a re-identified person, so only a plain overlap test is needed.
+function boxesOverlap(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w &&
+         a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
 interface CameraCardProps {
   camera: CameraData;
   onPlaying: () => void;
@@ -568,9 +585,13 @@ interface CameraCardProps {
 function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps) {
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Map of face boxes: position key → {bbox, label, confidence, expires}
+  // Map of face boxes keyed by the AI's stable track label ("Person 1", …).
+  // `bbox` is the latest box from the AI; `draw` is the smoothed box actually
+  // rendered, eased toward `bbox` every frame so a ~5 Hz detection feed does not
+  // look like it is teleporting on a 60 Hz canvas.
   const activeFacesRef = useRef<Map<string, {
     bbox: { x: number; y: number; w: number; h: number };
+    draw: { x: number; y: number; w: number; h: number } | null;
     label: string; confidence: number; expires: number;
   }>>(new Map());
   // Latest alert overlay (weapon / suspicious) — clears after 3 s
@@ -645,7 +666,27 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
     // ── Draw persistent face boxes (green) ────────────────────────
     for (const [key, f] of activeFacesRef.current) {
       if (now > f.expires) { activeFacesRef.current.delete(key); continue; }
-      const { px, py, pw, ph, labelY } = toPx(f.bbox.x, f.bbox.y, f.bbox.w, f.bbox.h);
+      // Ease the drawn box toward the latest detection. Purely cosmetic and
+      // free: it costs no inference, but turns a stepping box into a following
+      // one. Snap instead of easing on first sight, and once close enough, so a
+      // box never creeps forever toward its target.
+      if (!f.draw) {
+        f.draw = { ...f.bbox };
+      } else {
+        const d = f.draw;
+        const settled =
+          Math.abs(f.bbox.x - d.x) + Math.abs(f.bbox.y - d.y) +
+          Math.abs(f.bbox.w - d.w) + Math.abs(f.bbox.h - d.h) < 0.002;
+        if (settled) {
+          f.draw = { ...f.bbox };
+        } else {
+          d.x += (f.bbox.x - d.x) * FACE_BOX_SMOOTHING;
+          d.y += (f.bbox.y - d.y) * FACE_BOX_SMOOTHING;
+          d.w += (f.bbox.w - d.w) * FACE_BOX_SMOOTHING;
+          d.h += (f.bbox.h - d.h) * FACE_BOX_SMOOTHING;
+        }
+      }
+      const { px, py, pw, ph, labelY } = toPx(f.draw.x, f.draw.y, f.draw.w, f.draw.h);
       ctx.strokeStyle = '#22c55e';
       ctx.lineWidth   = 2.5;
       ctx.strokeRect(px, py, pw, ph);
@@ -719,9 +760,23 @@ function CameraCard({ camera, onPlaying, onStopped, onRemove }: CameraCardProps)
         // so that the same person's box always refreshes the same canvas slot,
         // while different people get independent slots.
         const key = data.label || `${(data.bbox.x * 10).toFixed(0)}:${(data.bbox.y * 10).toFixed(0)}`;
+        const previous = activeFacesRef.current.get(key);
+        // If the AI re-identifies someone, the old label stops being refreshed
+        // but survives its TTL, leaving a second box hanging where the person
+        // used to be. Any other slot overlapping this box is that stale twin.
+        for (const [otherKey, other] of activeFacesRef.current) {
+          if (otherKey !== key && boxesOverlap(other.bbox, data.bbox)) {
+            activeFacesRef.current.delete(otherKey);
+          }
+        }
         activeFacesRef.current.set(key, {
-          bbox: data.bbox, label: data.label,
-          confidence: data.confidence, expires: Date.now() + 8000,
+          bbox: data.bbox,
+          // Keep the smoothed box across updates so it eases from where it was
+          // drawn; a new person starts already at their real position.
+          draw: previous?.draw ?? null,
+          label: data.label,
+          confidence: data.confidence,
+          expires: Date.now() + FACE_BOX_TTL_MS,
         });
       } else {
         activeAlertRef.current = {
